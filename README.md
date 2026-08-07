@@ -20,7 +20,20 @@
 - **daed** + `luci-app-daed`（eBPF 透明代理）
 - **homebox**（网络测速工具箱）
 - **kmod-tcp-bbr**
-- LuCI + 简体中文、curl / wget / htop / bpftool
+- LuCI + 简体中文
+- **常用命令行工具**：`curl` `wget-ssl` `htop` `nano` `bash` `less` `file` `lsof` `findutils` `tar` `gzip` `unzip`
+- **网络排查工具**：`ip-full` `tcpdump-mini` `bind-dig` `mtr-json` `ethtool` `socat` `iperf3` `bpftool-minimal`
+- **硬件与传输**：`usbutils` `pciutils` `openssh-sftp-server`
+
+busybox 本身已提供绝大多数基础命令，上面只补它没有或功能残缺的。其中 `ip-full`
+是刻意加的——busybox 的 `ip` 看不了 tc 规则，而 daed 正是挂在 tc 层，出问题时没它没法查。
+
+> **包名有坑，改配置前务必核对 feed。** 已经踩到过的：`wget` 无此包（只有
+> `wget-ssl` / `wget-nossl`）、`mtr` 无此包（只有 `mtr-json` / `mtr-nojson`）、
+> `bpftool` 无此包（只有 `bpftool-minimal` / `bpftool-full`）、`zip` 和
+> `diffutils` 在 feed 里根本不存在、`coreutils` 是带 `MENU:=1` 的空壳菜单包
+> （真正的命令在 `coreutils-*` 子包里）。写错不会报错，`make defconfig`
+> 会静默改成 `n`——这正是 workflow 里那道逐条校验存在的原因。
 
 ### 为什么没有 TurboACC
 
