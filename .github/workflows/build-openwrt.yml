@@ -1,162 +1,265 @@
 #
-# https://github.com/P3TERX/Actions-OpenWrt
+# 斐讯 Phicomm K3 — ImmortalWrt + daed 自动构建
 #
-# File: .github/workflows/openwrt-bulder.yml
-# Description: Build OpenWrt using GitHub Actions
+# 基线：ImmortalWrt openwrt-25.12（内核 6.12，与 master 的 stable 内核同版本，
+#       但只收 bugfix，自动构建不易被上游改动冲垮）
 #
-# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
+# 基于 P3TERX/Actions-OpenWrt (MIT) 改写。
 #
 
-name: OpenWrt Builder
+name: Build OpenWrt for Phicomm K3
 
 on:
-  repository_dispatch:
   workflow_dispatch:
+    inputs:
+      ssh:
+        description: '编译前开一个 tmate SSH 会话用于调试'
+        required: false
+        default: 'false'
   schedule:
-    - cron: 5 0 * * 6
+    # 北京时间每周六 02:37（UTC 周五 18:37）
+    - cron: '37 18 * * 5'
+
+# 发布 Release 和清理旧 Release 都需要写权限。
+# 新建仓库的 GITHUB_TOKEN 默认可能是只读的，在这里显式声明，
+# 免得跑到最后一步才 403。
+permissions:
+  contents: write
+  actions: write
 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-25.12
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
-    - name: Initialization environment
+    - name: 清理磁盘空间
+      # 开了 KERNEL_DEBUG_INFO(DWARF) 才能生成 BTF，中间产物比常规编译大得多，
+      # runner 默认的可用空间不够，必须先腾地方。
+      run: |
+        echo "清理前："
+        df -hT /
+        sudo rm -rf \
+          /usr/share/dotnet \
+          /usr/local/lib/android \
+          /opt/ghc \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/local/share/boost \
+          /usr/local/graalvm \
+          /usr/local/.ghcup \
+          /usr/lib/jvm
+        sudo docker image prune --all --force
+        echo "清理后："
+        df -hT /
+
+    - name: 安装编译依赖
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force
+        sudo rm -rf /etc/apt/sources.list.d/*
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        # clang / llvm / lld 是给 CONFIG_BPF_TOOLCHAIN_HOST 用的：
+        # 让 OpenWrt 直接用宿主机的 LLVM 编译 daed 的 eBPF 字节码，
+        # 省掉自行构建一整套 LLVM 的 30-60 分钟。
+        sudo -E apt-get -qq install -y \
+          build-essential clang llvm lld flex bison g++ gawk \
+          gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+          libelf-dev python3 python3-setuptools python3-pyelftools \
+          rsync swig unzip zlib1g-dev file wget ccache cmake ninja-build \
+          qemu-utils squashfs-tools upx-ucl zstd time
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
+        echo "clang 版本（需 >= 12）："
+        clang --version | head -1
 
-    - name: Clone source code
-      working-directory: /workdir
+    - name: 拉取源码
       run: |
-        df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
+        git clone --depth 1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        echo "SRC_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        echo "KERNEL_VER=$(grep -oP '(?<=^KERNEL_PATCHVER:=).*' target/linux/bcm53xx/Makefile)" >> $GITHUB_ENV
 
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    - name: Load custom configuration
+    - name: 执行 diy-part1（feeds update 之前）
       run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
+        chmod +x "$DIY_P1_SH"
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        "$GITHUB_WORKSPACE/$DIY_P1_SH"
 
-    - name: Download package
-      id: package
+    - name: 更新并安装 feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: 载入配置并执行 diy-part2（feeds install 之后）
+      run: |
+        cp "$CONFIG_FILE" openwrt/.config
+        chmod +x "$DIY_P2_SH"
+        cd openwrt
+        "$GITHUB_WORKSPACE/$DIY_P2_SH"
+
+    - name: 生成完整配置
       run: |
         cd openwrt
         make defconfig
+
+    - name: 校验关键配置是否存活
+      # 种子 config 里的选项如果依赖不满足（或者包名写错了 —— 例如写成
+      # CONFIG_PACKAGE_bpftool 而实际只有 bpftool-minimal / bpftool-full），
+      # make defconfig 会静默把它改成 n，结果编出一个「看着成功、实际没有
+      # daed / 没有 BTF」的固件。在这里 fail-fast，别浪费两小时编译。
+      #
+      # 校验源直接取自仓库里的种子 config，以后加包自动纳入，无需同步维护清单。
+      run: |
+        cd openwrt
+        fail=0
+        check() {
+          if grep -qxF "$1" .config; then
+            echo "  [OK]   $1"
+          else
+            echo "  [FAIL] $1  —— 未生效！"
+            fail=1
+          fi
+        }
+
+        echo "== 种子 config 中所有 =y 选项 =="
+        while IFS= read -r line; do
+          check "$line"
+        done < <(grep -E '^CONFIG_[A-Za-z0-9_-]+=y$' "$GITHUB_WORKSPACE/$CONFIG_FILE")
+
+        echo
+        echo "== 由依赖自动带入、但必须存在的包 =="
+        check 'CONFIG_PACKAGE_daed=y'
+        check 'CONFIG_PACKAGE_daed-geoip=y'
+        check 'CONFIG_PACKAGE_daed-geosite=y'
+        check 'CONFIG_PACKAGE_kmod-sched-bpf=y'
+        check 'CONFIG_PACKAGE_kmod-sched-core=y'
+        check 'CONFIG_PACKAGE_kmod-xdp-sockets-diag=y'
+
+        echo
+        echo "== DEBUG_INFO_REDUCED 必须关闭（否则 pahole 无法生成 BTF）=="
+        if grep -qx 'CONFIG_KERNEL_DEBUG_INFO_REDUCED=y' .config; then
+          echo "  [FAIL] DEBUG_INFO_REDUCED 被打开了，BTF 无法生成"
+          fail=1
+        else
+          echo "  [OK]   已关闭"
+        fi
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::关键配置未生效，中止编译。"
+          exit 1
+        fi
+
+    - name: SSH 调试（手动触发且勾选时）
+      uses: mxschmitt/action-tmate@v3
+      if: github.event_name == 'workflow_dispatch' && inputs.ssh == 'true'
+
+    - name: 下载软件包源码
+      run: |
+        cd openwrt
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Compile the firmware
+    - name: 编译固件
       id: compile
       run: |
         cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "使用 $(nproc) 线程编译"
+        make -j"$(nproc)" || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "DEVICE_NAME=phicomm_k3" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y%m%d-%H%M")" >> $GITHUB_ENV
 
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
+    - name: 验证内核里真的带上了 BTF
+      # 刷机之前就把这件事确认掉。BTF 段不在 vmlinux 里，daed 上机必然起不来
+      # （报 "unable to find BTF for kernel"）。
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt
+        vmlinux=$(find build_dir -maxdepth 4 -name vmlinux -type f | head -1)
+        if [ -z "$vmlinux" ]; then
+          echo "::error::找不到 vmlinux，无法验证 BTF。"
+          exit 1
+        fi
+        echo "vmlinux: $vmlinux"
+        if readelf -S "$vmlinux" | grep -q '\.BTF'; then
+          echo "BTF 段确认存在："
+          readelf -S "$vmlinux" | grep '\.BTF'
+        else
+          echo "::error::vmlinux 中没有 .BTF 段，daed 在设备上将无法启动。"
+          exit 1
+        fi
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
-
-    - name: Organize files
+    - name: 整理固件
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
+        ls -lh
 
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
+    - name: 上传固件到 Artifacts
+      uses: actions/upload-artifact@v4
+      if: steps.organize.outputs.status == 'success'
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: OpenWrt_K3_${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
+    - name: 上传最终 .config（便于复现与排查）
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: config_${{ env.FILE_DATE || 'failed' }}
+        path: openwrt/.config
+        if-no-files-found: ignore
 
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@master
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+    - name: 发布 Release
+      uses: softprops/action-gh-release@v2
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
+        tag_name: ${{ env.FILE_DATE }}
+        name: Phicomm K3 ${{ env.FILE_DATE }}
         files: ${{ env.FIRMWARE }}/*
+        body: |
+          斐讯 Phicomm K3 固件（ImmortalWrt + daed）
 
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
+          - 源码分支：`${{ env.REPO_BRANCH }}` @ `${{ env.SRC_COMMIT }}`
+          - 内核版本：`${{ env.KERNEL_VER }}`
+          - 内核已启用 `CONFIG_KERNEL_DEBUG_INFO_BTF`（daed 运行的前提，编译时已验证 vmlinux 含 .BTF 段）
+          - 默认地址：`192.168.11.1`
+          - 已含：daed / luci-app-daed、homebox 测速、kmod-tcp-bbr
+
+          刷机后请先确认 `ls /sys/kernel/btf/vmlinux` 存在，再启动 daed。
+
+    - name: 清理旧的 workflow 运行记录
+      uses: Mattraks/delete-workflow-runs@v2
       with:
-        retain_days: 0
+        retain_days: 30
         keep_minimum_runs: 10
 
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+    - name: 清理旧的 Release
+      uses: dev-drprasad/delete-older-releases@v0.3.4
+      if: env.UPLOAD_RELEASE == 'true'
       with:
-        keep_latest: 10
+        keep_latest: 5
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

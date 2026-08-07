@@ -1,24 +1,14 @@
 #!/bin/bash
 #
-# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-# https://github.com/P3TERX/Actions-OpenWrt
 # File name: diy-part1.sh
-# Description: OpenWrt DIY script part 1 (Before Update feeds)
+# Description: OpenWrt DIY script part 1 (在 feeds update 之前执行)
+#
+# 此处只做 feeds.conf.default 层面的改动。
+# 注意：不要在这里整个挂载第三方 feed —— 很多第三方仓库含有与
+# ImmortalWrt 官方 feed 同名的包（7zip / zip / fonts / gcompat ...），
+# `feeds install -a` 会让后挂载的 feed 覆盖官方包。
+# 单个第三方包请放到 diy-part2.sh 里按需提取。
 #
 
-# Uncomment a feed source
+# 示例：启用官方 feeds.conf.default 里被注释掉的源
 #sed -i 's/^#\(.*helloworld\)/\1/' feeds.conf.default
-
-# Add a feed source
-#echo 'src-git helloworld https://github.com/fw876/helloworld' >>feeds.conf.default
-echo 'src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main' >>feeds.conf.default
-echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main' >>feeds.conf.default
-#echo 'src-git small https://github.com/kenzok8/small' >>feeds.conf.default
-#echo 'src-git small8 https://github.com/Lenyu2020/small-package' >>feeds.conf.default
-
-#Compile K3 Only
-sed -i 's|^TARGET_|# TARGET_|g; s|# TARGET_DEVICES += phicomm_k3|TARGET_DEVICES += phicomm_k3|' target/linux/bcm53xx/image/Makefile
