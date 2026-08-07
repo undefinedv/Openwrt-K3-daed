@@ -151,11 +151,13 @@ jobs:
       run: |
         cd openwrt
         fail=0
+        failed_list=""
         check() {
           if grep -qxF "$1" .config; then
             echo "  [OK]   $1"
           else
             echo "  [FAIL] $1  —— 未生效！"
+            failed_list="${failed_list}${1}"$'\n'
             fail=1
           fi
         }
@@ -178,13 +180,38 @@ jobs:
         echo "== DEBUG_INFO_REDUCED 必须关闭（否则 pahole 无法生成 BTF）=="
         if grep -qx 'CONFIG_KERNEL_DEBUG_INFO_REDUCED=y' .config; then
           echo "  [FAIL] DEBUG_INFO_REDUCED 被打开了，BTF 无法生成"
+          failed_list="${failed_list}CONFIG_KERNEL_DEBUG_INFO_REDUCED 被打开"$'\n'
           fail=1
         else
           echo "  [OK]   已关闭"
         fi
 
+        # 把结论写进 Job Summary，Actions 页面上直接可见，不必翻日志。
+        {
+          echo "## 配置校验"
+          if [ "$fail" -eq 0 ]; then
+            echo "全部通过。"
+          else
+            echo "以下选项被 \`make defconfig\` 丢弃（依赖不满足，或包名不存在）："
+            echo '```'
+            printf '%s' "$failed_list"
+            echo '```'
+            echo "### 诊断线索"
+            echo '```'
+            for f in $failed_list; do
+              opt="${f%=y}"; pk="${opt#CONFIG_PACKAGE_}"
+              echo "--- $opt"
+              # 该包是否被 feeds 索引到？没索引到说明包本身没被发现
+              grep -m1 -r "^Package: ${pk}$" tmp/.packageinfo 2>/dev/null \
+                && echo "    (包存在于 packageinfo，说明是依赖未满足)" \
+                || echo "    (packageinfo 中无此包，说明包名错误或未被扫描到)"
+            done
+            echo '```'
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
         if [ "$fail" -ne 0 ]; then
-          echo "::error::关键配置未生效，中止编译。"
+          echo "::error::关键配置未生效，中止编译。详见本次运行的 Summary。"
           exit 1
         fi
 
@@ -252,7 +279,10 @@ jobs:
       with:
         name: config_${{ env.FILE_DATE || 'failed' }}
         path: openwrt/.config
-        if-no-files-found: ignore
+        # upload-artifact v4 默认跳过隐藏文件，而 .config 正是隐藏文件。
+        # 不加这行，这个专为排查准备的产物会是空的 —— 恰好在最需要它的时候。
+        include-hidden-files: true
+        if-no-files-found: warn
 
     - name: 发布 Release
       uses: softprops/action-gh-release@v2
