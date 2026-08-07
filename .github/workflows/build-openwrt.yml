@@ -16,9 +16,23 @@ on:
         description: '编译前开一个 tmate SSH 会话用于调试'
         required: false
         default: 'false'
+  push:
+    branches: [main]
+    # 只有真正影响固件产物的文件变动才触发，改 README / LICENSE 不会白烧两小时。
+    paths:
+      - '.config'
+      - 'diy-part1.sh'
+      - 'diy-part2.sh'
+      - '.github/workflows/build-openwrt.yml'
   schedule:
     # 北京时间每周六 02:37（UTC 周五 18:37）
     - cron: '37 18 * * 5'
+
+# 连续推送时，新的构建会取消掉还在跑的旧构建。
+# 编译一次要两小时，旧配置的结果已经没意义了，没必要让它跑完。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 # 发布 Release 和清理旧 Release 都需要写权限。
 # 新建仓库的 GITHUB_TOKEN 默认可能是只读的，在这里显式声明，

@@ -108,8 +108,11 @@ make menuconfig          # 调整
 
 ## 触发构建
 
-- Actions 页面手动 `Run workflow`（可勾选 `ssh` 开 tmate 会话调试）
-- 定时：北京时间每周六 02:37
+- **推送自动触发**：改动 `.config`、`diy-part*.sh` 或 workflow 本身并推到 `main` 时自动开跑。
+  改 README / LICENSE 不会触发——两小时的编译不该被文档改动烧掉。
+  连续推送时新构建会取消还在跑的旧构建（`concurrency` + `cancel-in-progress`）。
+- **手动**：Actions 页面 `Run workflow`，可勾选 `ssh` 开 tmate 会话现场调试
+- **定时**：北京时间每周六 02:37
 
 ## 致谢
 
