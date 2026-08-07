@@ -68,21 +68,32 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/*
+        # 千万不要 `rm -rf /etc/apt/sources.list.d/*`。
+        # ubuntu-24.04 起 /etc/apt/sources.list 已被移除，主软件源改为 deb822
+        # 格式的 /etc/apt/sources.list.d/ubuntu.sources —— 删掉它等于删光系统
+        # 全部软件源，之后 apt-get update 拿不到任何包索引，install 必然失败。
+        # （22.04 时代 sources.list.d/ 里只有第三方源，删了没事，别照抄旧模板。）
         sudo -E apt-get -qq update
-        # clang / llvm / lld 是给 CONFIG_BPF_TOOLCHAIN_HOST 用的：
-        # 让 OpenWrt 直接用宿主机的 LLVM 编译 daed 的 eBPF 字节码，
-        # 省掉自行构建一整套 LLVM 的 30-60 分钟。
+
+        # 核心依赖：缺任何一个都编不下去，必须严格失败。
+        # clang / llvm / lld 是给 CONFIG_BPF_TOOLCHAIN_HOST 用的：让 OpenWrt
+        # 直接借宿主机的 LLVM 编译 daed 的 eBPF 字节码，省掉自建 LLVM 的 30-60 分钟。
         sudo -E apt-get -qq install -y \
           build-essential clang llvm lld flex bison g++ gawk \
           gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-          libelf-dev python3 python3-setuptools python3-pyelftools \
-          rsync swig unzip zlib1g-dev file wget ccache cmake ninja-build \
-          qemu-utils squashfs-tools upx-ucl zstd time
-        sudo -E apt-get -qq autoremove --purge
+          libelf-dev python3 python3-setuptools \
+          rsync swig unzip zlib1g-dev file wget
+
+        # 加速/便利类：装不上不致命，逐个来，缺了只告警不中止。
+        for p in ccache cmake ninja-build qemu-utils squashfs-tools \
+                 upx-ucl zstd time python3-pyelftools; do
+          sudo -E apt-get -qq install -y "$p" \
+            || echo "::warning::可选依赖安装失败，已跳过: $p"
+        done
+
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
-        echo "clang 版本（需 >= 12）："
+        echo "clang 版本（CONFIG_BPF_TOOLCHAIN_HOST 要求 >= 12）："
         clang --version | head -1
 
     - name: 拉取源码
